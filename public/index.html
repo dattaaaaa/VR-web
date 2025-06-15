@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VR Rover Control</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #000;
+            font-family: 'Courier New', monospace;
+            color: #0f0;
+            overflow: hidden;
+        }
+        
+        .desktop-ui {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1000;
+            background: linear-gradient(45deg, #0a0a0a, #1a1a1a);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+        }
+        
+        .control-panel {
+            background: rgba(0, 255, 0, 0.1);
+            border: 2px solid #0f0;
+            border-radius: 10px;
+            padding: 30px;
+            max-width: 600px;
+            margin: 20px;
+        }
+        
+        .status-display {
+            background: rgba(0, 0, 0, 0.8);
+            border: 1px solid #0f0;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 5px;
+            font-size: 14px;
+            text-align: left;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        
+        .enter-vr-btn {
+            background: linear-gradient(45deg, #00ff00, #00cc00);
+            color: #000;
+            border: none;
+            padding: 20px 40px;
+            font-size: 20px;
+            font-weight: bold;
+            border-radius: 10px;
+            cursor: pointer;
+            margin: 20px;
+            transition: all 0.3s;
+            box-shadow: 0 0 20px rgba(0, 255, 0, 0.3);
+        }
+        
+        .enter-vr-btn:hover {
+            background: linear-gradient(45deg, #00cc00, #009900);
+            box-shadow: 0 0 30px rgba(0, 255, 0, 0.5);
+            transform: scale(1.05);
+        }
+        
+        .enter-vr-btn:disabled {
+            background: #333;
+            color: #666;
+            cursor: not-allowed;
+            box-shadow: none;
+            transform: none;
+        }
+        
+        .emergency-btn {
+            background: linear-gradient(45deg, #ff0000, #cc0000);
+            color: #fff;
+            border: none;
+            padding: 15px 30px;
+            font-size: 16px;
+            font-weight: bold;
+            border-radius: 8px;
+            cursor: pointer;
+            margin: 10px;
+            transition: all 0.3s;
+            box-shadow: 0 0 15px rgba(255, 0, 0, 0.3);
+        }
+        
+        .emergency-btn:hover {
+            background: linear-gradient(45deg, #cc0000, #990000);
+            box-shadow: 0 0 25px rgba(255, 0, 0, 0.5);
+        }
+        
+        .connection-status {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            padding: 10px 15px;
+            background: rgba(0, 0, 0, 0.8);
+            border: 1px solid #0f0;
+            border-radius: 5px;
+            font-size: 12px;
+        }
+        
+        .status-connected { border-color: #0f0; color: #0f0; }
+        .status-disconnected { border-color: #f00; color: #f00; }
+        
+        #vr-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        
+        .log-entry {
+            margin: 5px 0;
+            padding: 5px;
+            border-left: 3px solid #0f0;
+            background: rgba(0, 255, 0, 0.05);
+        }
+        
+        .log-error { border-left-color: #f00; color: #faa; }
+        .log-warning { border-left-color: #fa0; color: #ffa; }
+        .log-success { border-left-color: #0f0; color: #aff; }
+    </style>
+</head>
+<body>
+    <div class="connection-status" id="connection-status">
+        <div id="socket-status">🔌 Connecting...</div>
+        <div id="mqtt-status">📡 MQTT: Unknown</div>
+    </div>
+
+    <div class="desktop-ui" id="desktop-ui">
+        <div class="control-panel">
+            <h1>🚀 VR ROVER CONTROL SYSTEM</h1>
+            <p>Meta Quest 2 Controller Interface</p>
+            
+            <div class="status-display" id="status-display">
+                <div class="log-entry">🔄 Initializing VR system...</div>
+            </div>
+            
+            <button id="enter-vr-btn" class="enter-vr-btn" disabled>
+                🥽 ENTER VR MODE
+            </button>
+            
+            <button id="emergency-btn" class="emergency-btn">
+                🚨 EMERGENCY STOP
+            </button>
+            
+            <div style="margin-top: 20px; font-size: 14px; color: #888;">
+                <p><strong>Controls:</strong></p>
+                <p>• Right Thumbstick: Forward/Backward/Left/Right</p>
+                <p>• Left Thumbstick: Rotate Left/Right</p>
+                <p>• Trigger Buttons: Emergency Stop</p>
+            </div>
+        </div>
+    </div>
+
+    <canvas id="vr-canvas"></canvas>
+
+    <script>
+        class VRRoverController {
+            constructor() {
+                this.scene = null;
+                this.camera = null;
+                this.renderer = null;
+                this.xrSession = null;
+                this.xrRefSpace = null;
+                this.socket = null;
+                this.isInVR = false;
+                
+                this.displayPlane = null;
+                this.displayTexture = null;
+                this.displayCanvas = null;
+                this.displayContext = null;
+                
+                this.controllerStates = {
+                    left: { axes: [0, 0], buttons: [] },
+                    right: { axes: [0, 0], buttons: [] }
+                };
+                
+                this.lastCommandTime = 0;
+                this.commandThrottle = 50; // ms
+                
+                this.init();
+            }
+            
+            async init() {
+                this.setupSocket();
+                this.setupUI();
+                await this.setupVR();
+                this.setupThreeJS();
+            }
+            
+            setupSocket() {
+                this.socket = io();
+                
+                this.socket.on('connect', () => {
+                    this.log('✅ Connected to server', 'success');
+                    document.getElementById('socket-status').textContent = '🟢 Connected';
+                    document.getElementById('connection-status').className = 'connection-status status-connected';
+                });
+                
+                this.socket.on('disconnect', () => {
+                    this.log('❌ Disconnected from server', 'error');
+                    document.getElementById('socket-status').textContent = '🔴 Disconnected';
+                    document.getElementById('connection-status').className = 'connection-status status-disconnected';
+                });
+                
+                this.socket.on('motor-feedback', (data) => {
+                    this.log(`🤖 Motor Command: ${data.command}`, 'success');
+                    this.updateVRDisplay(`Command: ${data.command}`, data);
+                });
+                
+                this.socket.on('rover-status', (data) => {
+                    this.log(`📡 Rover: ${data.message}`, 'success');
+                    document.getElementById('mqtt-status').textContent = `📡 MQTT: Active`;
+                });
+                
+                // Check server status
+                fetch('/api/status')
+                    .then(res => res.json())
+                    .then(data => {
+                        const mqttStatus = data.mqtt.connected ? '🟢 Connected' : '🔴 Disconnected';
+                        document.getElementById('mqtt-status').textContent = `📡 MQTT: ${mqttStatus}`;
+                    })
+                    .catch(err => console.error('Status check failed:', err));
+            }
+            
+            setupUI() {
+                const enterVRBtn = document.getElementById('enter-vr-btn');
+                const emergencyBtn = document.getElementById('emergency-btn');
+                
+                enterVRBtn.addEventListener('click', () => this.enterVR());
+                emergencyBtn.addEventListener('click', () => this.emergencyStop());
+            }
+            
+            async setupVR() {
+                if (!navigator.xr) {
+                    this.log('❌ WebXR not supported', 'error');
+                    return;
+                }
+                
+                try {
+                    const supported = await navigator.xr.isSessionSupported('immersive-vr');
+                    if (supported) {
+                        this.log('✅ VR supported - Ready to launch!', 'success');
+                        document.getElementById('enter-vr-btn').disabled = false;
+                    } else {
+                        this.log('⚠️ VR not supported on this device', 'warning');
+                    }
+                } catch (error) {
+                    this.log(`❌ VR check failed: ${error.message}`, 'error');
+                }
+            }
+            
+            setupThreeJS() {
+                const canvas = document.getElementById('vr-canvas');
+                
+                // Scene setup
+                this.scene = new THREE.Scene();
+                this.scene.background = new THREE.Color(0x001122);
+                
+                // Camera
+                this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+                this.camera.position.set(0, 1.6, 0);
+                
+                // Renderer
+                this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                this.renderer.xr.enabled = true;
+                
+                // Create display canvas for text
+                this.displayCanvas = document.createElement('canvas');
+                this.displayCanvas.width = 1024;
+                this.displayCanvas.height = 512;
+                this.displayContext = this.displayCanvas.getContext('2d');
+                
+                // Create display plane
+                this.displayTexture = new THREE.CanvasTexture(this.displayCanvas);
+                const displayGeometry = new THREE.PlaneGeometry(2, 1);
+                const displayMaterial = new THREE.MeshBasicMaterial({ 
+                    map: this.displayTexture, 
+                    transparent: true 
+                });
+                this.displayPlane = new THREE.Mesh(displayGeometry, displayMaterial);
+                this.displayPlane.position.set(0, 1.5, -2);
+                this.scene.add(this.displayPlane);
+                
+                // Add some ambient lighting
+                const ambientLight = new THREE.AmbientLight(0x404040, 0.6);
+                this.scene.add(ambientLight);
+                
+                const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+                directionalLight.position.set(0, 1, 1);
+                this.scene.add(directionalLight);
+                
+                // Add grid floor
+                const gridHelper = new THREE.GridHelper(10, 10, 0x00ff00, 0x004400);
+                gridHelper.position.y = -0.1;
+                this.scene.add(gridHelper);
+                
+                this.updateVRDisplay('VR System Ready', { command: 'STOP' });
+            }
+            
+            async enterVR() {
+                try {
+                    this.xrSession = await navigator.xr.requestSession('immersive-vr', {
+                        requiredFeatures: ['local']
+                    });
+                    
+                    await this.renderer.xr.setSession(this.xrSession);
+                    this.xrRefSpace = await this.xrSession.requestReferenceSpace('local');
+                    
+                    this.xrSession.addEventListener('end', () => this.onVREnd());
+                    this.xrSession.addEventListener('inputsourceschange', (e) => this.onInputChange(e));
+                    
+                    document.getElementById('desktop-ui').style.display = 'none';
+                    this.isInVR = true;
+                    
+                    this.log('🥽 Entered VR mode - Controllers active', 'success');
+                    this.updateVRDisplay('VR MODE ACTIVE', { command: 'READY' });
+                    
+                    // Start render loop
+                    this.renderer.setAnimationLoop(() => this.render());
+                    
+                } catch (error) {
+                    this.log(`❌ Failed to enter VR: ${error.message}`, 'error');
+                }
+            }
+            
+            onVREnd() {
+                this.isInVR = false;
+                document.getElementById('desktop-ui').style.display = 'flex';
+                this.log('👋 Exited VR mode', 'success');
+                this.renderer.setAnimationLoop(null);
+            }
+            
+            onInputChange(event) {
+                event.added.forEach(source => {
+                    this.log(`🎮 Controller connected: ${source.handedness}`, 'success');
+                });
+                
+                event.removed.forEach(source => {
+                    this.log(`🎮 Controller disconnected: ${source.handedness}`, 'warning');
+                });
+            }
+            
+            render() {
+                if (!this.isInVR) return;
+                
+                // Process controllers
+                if (this.xrSession) {
+                    const inputSources = this.xrSession.inputSources;
+                    this.processControllers(inputSources);
+                }
+                
+                this.renderer.render(this.scene, this.camera);
+            }
+            
+            processControllers(inputSources) {
+                const now = Date.now();
+                if (now - this.lastCommandTime < this.commandThrottle) return;
+                
+                let leftController = { axes: [0, 0], buttons: [] };
+                let rightController = { axes: [0, 0], buttons: [] };
+                
+                for (const source of inputSources) {
+                    if (!source.gamepad) continue;
+                    
+                    const controllerData = {
+                        axes: Array.from(source.gamepad.axes),
+                        buttons: source.gamepad.buttons.map(b => ({
+                            pressed: b.pressed,
+                            value: b.value
+                        }))
+                    };
+                    
+                    if (source.handedness === 'left') {
+                        leftController = controllerData;
+                    } else if (source.handedness === 'right') {
+                        rightController = controllerData;
+                    }
+                }
+                
+                // Check if there's significant input change
+                if (this.hasSignificantInput(leftController, rightController)) {
+                    this.socket.emit('controller-input', {
+                        leftController,
+                        rightController,
+                        timestamp: now
+                    });
+                    
+                    this.lastCommandTime = now;
+                }
+                
+                this.controllerStates.left = leftController;
+                this.controllerStates.right = rightController;
+            }
+            
+            hasSignificantInput(left, right) {
+                const threshold = 0.1;
+                
+                // Check axes
+                for (let i = 0; i < 2; i++) {
+                    if (Math.abs((left.axes[i] || 0) - (this.controllerStates.left.axes[i] || 0)) > threshold) return true;
+                    if (Math.abs((right.axes[i] || 0) - (this.controllerStates.right.axes[i] || 0)) > threshold) return true;
+                }
+                
+                // Check buttons
+                const leftPressed = left.buttons?.filter(b => b.pressed).length || 0;
+                const rightPressed = right.buttons?.filter(b => b.pressed).length || 0;
+                const prevLeftPressed = this.controllerStates.left.buttons?.filter(b => b.pressed).length || 0;
+                const prevRightPressed = this.controllerStates.right.buttons?.filter(b => b.pressed).length || 0;
+                
+                return leftPressed !== prevLeftPressed || rightPressed !== prevRightPressed;
+            }
+            
+            updateVRDisplay(title, data) {
+                if (!this.displayContext) return;
+                
+                const ctx = this.displayContext;
+                const canvas = this.displayCanvas;
+                
+                // Clear canvas
+                ctx.fillStyle = '#000022';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                
+                // Draw border
+                ctx.strokeStyle = '#00ff00';
+                ctx.lineWidth = 4;
+                ctx.strokeRect(10, 10, canvas.width - 20, canvas.height - 20);
+                
+                // Title
+                ctx.fillStyle = '#00ff00';
+                ctx.font = 'bold 48px monospace';
+                ctx.textAlign = 'center';
+                ctx.fillText(title, canvas.width / 2, 80);
+                
+                // Command info
+                if (data && data.command) {
+                    ctx.font = 'bold 36px monospace';
+                    ctx.fillStyle = data.command === 'STOP' ? '#ffff00' : '#00ffff';
+                    ctx.fillText(`Command: ${data.command}`, canvas.width / 2, 140);
+                }
+                
+                // Controller status
+                ctx.font = '24px monospace';
+                ctx.fillStyle = '#aaffaa';
+                ctx.textAlign = 'left';
+                
+                const leftAxes = this.controllerStates.left.axes || [0, 0];
+                const rightAxes = this.controllerStates.right.axes || [0, 0];
+                
+                ctx.fillText(`Left Stick: X=${leftAxes[0]?.toFixed(2) || '0.00'} Y=${leftAxes[1]?.toFixed(2) || '0.00'}`, 50, 200);
+                ctx.fillText(`Right Stick: X=${rightAxes[0]?.toFixed(2) || '0.00'} Y=${rightAxes[1]?.toFixed(2) || '0.00'}`, 50, 240);
+                
+                // Motor states
+                if (data && data.motorStates) {
+                    ctx.fillStyle = '#ffaa00';
+                    ctx.fillText('Motor States:', 50, 300);
+                    ctx.fillStyle = '#ffffff';
+                    ctx.fillText(`Group 1 (1,3,5): ${data.motorStates.motor1 === 1 ? 'FORWARD' : data.motorStates.motor1 === -1 ? 'BACKWARD' : 'STOP'}`, 50, 330);
+                    ctx.fillText(`Group 2 (2,4,6): ${data.motorStates.motor2 === 1 ? 'FORWARD' : data.motorStates.motor2 === -1 ? 'BACKWARD' : 'STOP'}`, 50, 360);
+                }
+                
+                // Instructions
+                ctx.fillStyle = '#888888';
+                ctx.font = '20px monospace';
+                ctx.fillText('Right Stick: Move Forward/Back/Left/Right', 50, 420);
+                ctx.fillText('Left Stick: Rotate Left/Right', 50, 450);
+                ctx.fillText('Triggers: Emergency Stop', 50, 480);
+                
+                // Update texture
+                this.displayTexture.needsUpdate = true;
+            }
+            
+            emergencyStop() {
+                this.socket.emit('emergency-stop');
+                this.log('🚨 EMERGENCY STOP activated!', 'error');
+                if (this.isInVR) {
+                    this.updateVRDisplay('EMERGENCY STOP', { command: 'EMERGENCY_STOP' });
+                }
+            }
+            
+            log(message, type = 'info') {
+                const timestamp = new Date().toLocaleTimeString();
+                const logEntry = document.createElement('div');
+                logEntry.className = `log-entry log-${type}`;
+                logEntry.innerHTML = `<strong>[${timestamp}]</strong> ${message}`;
+                
+                const statusDisplay = document.getElementById('status-display');
+                statusDisplay.appendChild(logEntry);
+                statusDisplay.scrollTop = statusDisplay.scrollHeight;
+                
+                // Keep only last 50 entries
+                while (statusDisplay.children.length > 50) {
+                    statusDisplay.removeChild(statusDisplay.firstChild);
+                }
+                
+                console.log(`[VR Rover] ${message}`);
+            }
+        }
+        
+        // Initialize the VR Rover Controller
+        const vrRover = new VRRoverController();
+        
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            if (vrRover.camera && vrRover.renderer) {
+                vrRover.camera.aspect = window.innerWidth / window.innerHeight;
+                vrRover.camera.updateProjectionMatrix();
+                vrRover.renderer.setSize(window.innerWidth, window.innerHeight);
+            }
+        });
+        
+        // Debug info
+        console.log('🚀 VR Rover Control System Initialized');
+        console.log('📱 For best experience, use Meta Quest 2 browser');
+        console.log('🎮 Make sure controllers are paired and active');
+    </script>
+</body>
+</html>
