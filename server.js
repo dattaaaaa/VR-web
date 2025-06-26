@@ -117,7 +117,14 @@ class MotorController {
             group2,
             motors: this.getMotorStates()
         };
-    }
+
+        // Add this temporary debug code to your server.js processControllerInput method
+        console.log('🔍 RAW CONTROLLER DATA:');
+        console.log('Left axes length:', leftController.axes?.length);
+        console.log('Right axes length:', rightController.axes?.length);
+        console.log('Left axes values:', leftController.axes);
+        console.log('Right axes values:', rightController.axes);
+            }
 
     getMotorStates() {
         return {

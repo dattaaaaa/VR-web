@@ -184,8 +184,8 @@
                 this.displayContext = null;
                 
                 this.controllerStates = {
-                    left: { axes: [0, 0], buttons: [] },
-                    right: { axes: [0, 0], buttons: [] }
+                    left: { axes: [0, 0, 0, 0], buttons: [] },
+                    right: { axes: [0, 0, 0, 0], buttons: [] }
                 };
                 
                 this.lastCommandTime = 0;
@@ -197,8 +197,8 @@
             async init() {
                 this.setupSocket();
                 this.setupUI();
-                await this.setupVR();
                 this.setupThreeJS();
+                await this.setupVR();
             }
             
             setupSocket() {
@@ -244,25 +244,6 @@
                 emergencyBtn.addEventListener('click', () => this.emergencyStop());
             }
             
-            async setupVR() {
-                if (!navigator.xr) {
-                    this.log('❌ WebXR not supported', 'error');
-                    return;
-                }
-                
-                try {
-                    const supported = await navigator.xr.isSessionSupported('immersive-vr');
-                    if (supported) {
-                        this.log('✅ VR supported - Ready to launch!', 'success');
-                        document.getElementById('enter-vr-btn').disabled = false;
-                    } else {
-                        this.log('⚠️ VR not supported on this device', 'warning');
-                    }
-                } catch (error) {
-                    this.log(`❌ VR check failed: ${error.message}`, 'error');
-                }
-            }
-            
             setupThreeJS() {
                 const canvas = document.getElementById('vr-canvas');
                 
@@ -274,10 +255,20 @@
                 this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
                 this.camera.position.set(0, 1.6, 0);
                 
-                // Renderer
-                this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+                // Renderer with WebXR optimizations for Quest 2
+                this.renderer = new THREE.WebGLRenderer({ 
+                    canvas, 
+                    antialias: true,
+                    alpha: false,
+                    powerPreference: "high-performance"
+                });
                 this.renderer.setSize(window.innerWidth, window.innerHeight);
+                this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+                this.renderer.outputEncoding = THREE.sRGBEncoding;
+                
+                // Critical: Enable XR and set reference space type
                 this.renderer.xr.enabled = true;
+                this.renderer.xr.setReferenceSpaceType('local-floor');
                 
                 // Create display canvas for text
                 this.displayCanvas = document.createElement('canvas');
@@ -306,35 +297,123 @@
                 
                 // Add grid floor
                 const gridHelper = new THREE.GridHelper(10, 10, 0x00ff00, 0x004400);
-                gridHelper.position.y = -0.1;
+                gridHelper.position.y = 0;
                 this.scene.add(gridHelper);
                 
                 this.updateVRDisplay('VR System Ready', { command: 'STOP' });
+                
+                // Start render loop immediately for desktop preview
+                this.renderer.setAnimationLoop(() => this.render());
+            }
+            
+            async setupVR() {
+                // Check if WebXR is available
+                if (!navigator.xr) {
+                    this.log('❌ WebXR not supported - using older browser?', 'error');
+                    return;
+                }
+                
+                try {
+                    // Check for immersive-vr support with detailed logging
+                    this.log('🔍 Checking VR support...', 'info');
+                    
+                    const isSupported = await navigator.xr.isSessionSupported('immersive-vr');
+                    this.log(`📱 VR Support Result: ${isSupported}`, isSupported ? 'success' : 'error');
+                    
+                    if (isSupported) {
+                        this.log('✅ VR Ready! Meta Quest 2 detected', 'success');
+                        document.getElementById('enter-vr-btn').disabled = false;
+                        document.getElementById('enter-vr-btn').textContent = '🥽 ENTER VR MODE';
+                        
+                        // Additional Quest 2 specific checks
+                        this.checkQuestFeatures();
+                    } else {
+                        this.log('⚠️ VR not available - check headset connection', 'warning');
+                        document.getElementById('enter-vr-btn').textContent = '❌ VR NOT AVAILABLE';
+                    }
+                } catch (error) {
+                    this.log(`❌ VR Setup Error: ${error.message}`, 'error');
+                    console.error('VR Setup Error Details:', error);
+                }
+            }
+            
+            async checkQuestFeatures() {
+                try {
+                    // Check for controller support
+                    const features = ['local', 'local-floor', 'bounded-floor'];
+                    for (const feature of features) {
+                        try {
+                            const supported = await navigator.xr.isSessionSupported('immersive-vr', {
+                                requiredFeatures: [feature]
+                            });
+                            this.log(`📋 Feature '${feature}': ${supported ? '✅' : '❌'}`, 'info');
+                        } catch (e) {
+                            this.log(`📋 Feature '${feature}': ❌ (${e.message})`, 'warning');
+                        }
+                    }
+                } catch (error) {
+                    this.log(`⚠️ Feature check failed: ${error.message}`, 'warning');
+                }
             }
             
             async enterVR() {
+                if (!navigator.xr) {
+                    this.log('❌ WebXR not available', 'error');
+                    return;
+                }
+                
                 try {
-                    this.xrSession = await navigator.xr.requestSession('immersive-vr', {
+                    this.log('🚀 Requesting VR session...', 'info');
+                    
+                    // Request VR session with Quest 2 optimized settings
+                    const sessionInit = {
+                        optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'],
                         requiredFeatures: ['local']
-                    });
+                    };
                     
+                    this.xrSession = await navigator.xr.requestSession('immersive-vr', sessionInit);
+                    this.log('✅ VR Session created successfully', 'success');
+                    
+                    // Set up the session
                     await this.renderer.xr.setSession(this.xrSession);
-                    this.xrRefSpace = await this.xrSession.requestReferenceSpace('local');
+                    this.log('✅ Renderer XR session set', 'success');
                     
+                    // Get reference space
+                    try {
+                        this.xrRefSpace = await this.xrSession.requestReferenceSpace('local-floor');
+                        this.log('✅ Using local-floor reference space', 'success');
+                    } catch (e) {
+                        this.xrRefSpace = await this.xrSession.requestReferenceSpace('local');
+                        this.log('✅ Using local reference space (fallback)', 'warning');
+                    }
+                    
+                    // Set up event listeners
                     this.xrSession.addEventListener('end', () => this.onVREnd());
                     this.xrSession.addEventListener('inputsourceschange', (e) => this.onInputChange(e));
+                    this.xrSession.addEventListener('select', (e) => this.onSelect(e));
+                    this.xrSession.addEventListener('selectstart', (e) => this.onSelectStart(e));
+                    this.xrSession.addEventListener('selectend', (e) => this.onSelectEnd(e));
                     
+                    // Hide desktop UI and show VR mode
                     document.getElementById('desktop-ui').style.display = 'none';
                     this.isInVR = true;
                     
-                    this.log('🥽 Entered VR mode - Controllers active', 'success');
+                    this.log('🥽 VR MODE ACTIVE - Controllers ready!', 'success');
                     this.updateVRDisplay('VR MODE ACTIVE', { command: 'READY' });
                     
-                    // Start render loop
-                    this.renderer.setAnimationLoop(() => this.render());
+                    // Log initial input sources
+                    this.log(`🎮 Input sources: ${this.xrSession.inputSources.length}`, 'info');
                     
                 } catch (error) {
-                    this.log(`❌ Failed to enter VR: ${error.message}`, 'error');
+                    this.log(`❌ VR Entry Failed: ${error.message}`, 'error');
+                    console.error('VR Entry Error Details:', error);
+                    
+                    // Provide specific error guidance
+                    if (error.message.includes('NotSupportedError')) {
+                        this.log('💡 Try: Ensure Quest 2 is connected and browser has permissions', 'warning');
+                    } else if (error.message.includes('NotAllowedError')) {
+                        this.log('💡 Permission denied - refresh page and try again', 'warning');
+                    }
                 }
             }
             
@@ -342,12 +421,13 @@
                 this.isInVR = false;
                 document.getElementById('desktop-ui').style.display = 'flex';
                 this.log('👋 Exited VR mode', 'success');
-                this.renderer.setAnimationLoop(null);
+                this.xrSession = null;
+                this.xrRefSpace = null;
             }
             
             onInputChange(event) {
                 event.added.forEach(source => {
-                    this.log(`🎮 Controller connected: ${source.handedness}`, 'success');
+                    this.log(`🎮 Controller connected: ${source.handedness} (${source.targetRayMode})`, 'success');
                 });
                 
                 event.removed.forEach(source => {
@@ -355,13 +435,25 @@
                 });
             }
             
+            onSelect(event) {
+                this.log('🔘 Controller select event', 'info');
+            }
+            
+            onSelectStart(event) {
+                this.log('🔘 Controller select start', 'info');
+            }
+            
+            onSelectEnd(event) {
+                this.log('🔘 Controller select end', 'info');
+            }
+            
             render() {
-                if (!this.isInVR) return;
-                
-                // Process controllers
-                if (this.xrSession) {
+                // Process controllers if in VR
+                if (this.isInVR && this.xrSession) {
                     const inputSources = this.xrSession.inputSources;
-                    this.processControllers(inputSources);
+                    if (inputSources.length > 0) {
+                        this.processControllers(inputSources);
+                    }
                 }
                 
                 this.renderer.render(this.scene, this.camera);
@@ -371,15 +463,15 @@
                 const now = Date.now();
                 if (now - this.lastCommandTime < this.commandThrottle) return;
                 
-                let leftController = { axes: [0, 0], buttons: [] };
-                let rightController = { axes: [0, 0], buttons: [] };
+                let leftController = { axes: [0, 0, 0, 0], buttons: [] };
+                let rightController = { axes: [0, 0, 0, 0], buttons: [] };
                 
                 for (const source of inputSources) {
                     if (!source.gamepad) continue;
                     
                     const controllerData = {
-                        axes: Array.from(source.gamepad.axes),
-                        buttons: source.gamepad.buttons.map(b => ({
+                        axes: Array.from(source.gamepad.axes || []),
+                        buttons: (source.gamepad.buttons || []).map(b => ({
                             pressed: b.pressed,
                             value: b.value
                         }))
@@ -392,8 +484,25 @@
                     }
                 }
                 
-                // Check if there's significant input change
-                if (this.hasSignificantInput(leftController, rightController)) {
+                // Debug logging to see actual controller values
+                if (leftController.axes.length > 0 || rightController.axes.length > 0) {
+                    console.log('Controller Data:', {
+                        left: { 
+                            axes: leftController.axes.map(a => a.toFixed(3)),
+                            buttonsPressed: leftController.buttons.filter(b => b.pressed).length
+                        },
+                        right: { 
+                            axes: rightController.axes.map(a => a.toFixed(3)),
+                            buttonsPressed: rightController.buttons.filter(b => b.pressed).length
+                        }
+                    });
+                }
+                
+                // Always send controller data if there's any significant input OR if it's different from last state
+                const hasInput = this.hasAnyInput(leftController, rightController);
+                const hasChanged = this.hasSignificantInputChange(leftController, rightController);
+                
+                if (hasInput || hasChanged) {
                     this.socket.emit('controller-input', {
                         leftController,
                         rightController,
@@ -401,28 +510,85 @@
                     });
                     
                     this.lastCommandTime = now;
+                    
+                    // Update VR display with current input
+                    const displayData = this.getDisplayData(leftController, rightController);
+                    this.updateVRDisplay('Controller Input Active', displayData);
                 }
                 
                 this.controllerStates.left = leftController;
                 this.controllerStates.right = rightController;
             }
             
-            hasSignificantInput(left, right) {
-                const threshold = 0.1;
+            hasAnyInput(left, right) {
+                const threshold = 0.15; // Lowered threshold for better sensitivity
                 
                 // Check axes
-                for (let i = 0; i < 2; i++) {
-                    if (Math.abs((left.axes[i] || 0) - (this.controllerStates.left.axes[i] || 0)) > threshold) return true;
-                    if (Math.abs((right.axes[i] || 0) - (this.controllerStates.right.axes[i] || 0)) > threshold) return true;
+                for (let i = 0; i < Math.max(left.axes?.length || 0, right.axes?.length || 0); i++) {
+                    if (Math.abs(left.axes?.[i] || 0) > threshold) return true;
+                    if (Math.abs(right.axes?.[i] || 0) > threshold) return true;
                 }
                 
                 // Check buttons
+                const leftPressed = left.buttons?.some(b => b.pressed) || false;
+                const rightPressed = right.buttons?.some(b => b.pressed) || false;
+                
+                return leftPressed || rightPressed;
+            }
+            
+            hasSignificantInputChange(left, right) {
+                const threshold = 0.05; // Small threshold for detecting changes
+                
+                // Check axes changes
+                for (let i = 0; i < 4; i++) { // Check up to 4 axes
+                    const leftCurrent = left.axes?.[i] || 0;
+                    const leftPrevious = this.controllerStates.left.axes?.[i] || 0;
+                    const rightCurrent = right.axes?.[i] || 0;
+                    const rightPrevious = this.controllerStates.right.axes?.[i] || 0;
+                    
+                    if (Math.abs(leftCurrent - leftPrevious) > threshold) return true;
+                    if (Math.abs(rightCurrent - rightPrevious) > threshold) return true;
+                }
+                
+                // Check button changes
                 const leftPressed = left.buttons?.filter(b => b.pressed).length || 0;
                 const rightPressed = right.buttons?.filter(b => b.pressed).length || 0;
                 const prevLeftPressed = this.controllerStates.left.buttons?.filter(b => b.pressed).length || 0;
                 const prevRightPressed = this.controllerStates.right.buttons?.filter(b => b.pressed).length || 0;
                 
                 return leftPressed !== prevLeftPressed || rightPressed !== prevRightPressed;
+            }
+            
+            getDisplayData(leftController, rightController) {
+                // Determine current command based on input
+                let command = 'STOP';
+                
+                if (rightController.axes && rightController.axes.length >= 2) {
+                    const x = rightController.axes[0];
+                    const y = rightController.axes[1];
+                    
+                    if (Math.abs(y) > 0.15 || Math.abs(x) > 0.15) {
+                        if (Math.abs(y) > Math.abs(x)) {
+                            command = y < 0 ? 'FORWARD' : 'BACKWARD';
+                        } else {
+                            command = x < 0 ? 'LEFT' : 'RIGHT';
+                        }
+                    }
+                }
+                
+                if (leftController.axes && leftController.axes.length >= 2) {
+                    const x = leftController.axes[0];
+                    if (Math.abs(x) > 0.15) {
+                        command = x < 0 ? 'ROTATE_LEFT' : 'ROTATE_RIGHT';
+                    }
+                }
+                
+                // Check for emergency stop
+                if (leftController.buttons?.[1]?.pressed || rightController.buttons?.[1]?.pressed) {
+                    command = 'EMERGENCY_STOP';
+                }
+                
+                return { command };
             }
             
             updateVRDisplay(title, data) {
@@ -458,26 +624,32 @@
                 ctx.fillStyle = '#aaffaa';
                 ctx.textAlign = 'left';
                 
-                const leftAxes = this.controllerStates.left.axes || [0, 0];
-                const rightAxes = this.controllerStates.right.axes || [0, 0];
+                const leftAxes = this.controllerStates.left.axes || [0, 0, 0, 0];
+                const rightAxes = this.controllerStates.right.axes || [0, 0, 0, 0];
                 
                 ctx.fillText(`Left Stick: X=${leftAxes[0]?.toFixed(2) || '0.00'} Y=${leftAxes[1]?.toFixed(2) || '0.00'}`, 50, 200);
                 ctx.fillText(`Right Stick: X=${rightAxes[0]?.toFixed(2) || '0.00'} Y=${rightAxes[1]?.toFixed(2) || '0.00'}`, 50, 240);
                 
+                // Show all axes for debugging
+                ctx.fillStyle = '#888888';
+                ctx.font = '18px monospace';
+                ctx.fillText(`Left All Axes: [${leftAxes.map(a => a?.toFixed(2) || '0.00').join(', ')}]`, 50, 280);
+                ctx.fillText(`Right All Axes: [${rightAxes.map(a => a?.toFixed(2) || '0.00').join(', ')}]`, 50, 300);
+                
                 // Motor states
                 if (data && data.motorStates) {
                     ctx.fillStyle = '#ffaa00';
-                    ctx.fillText('Motor States:', 50, 300);
+                    ctx.fillText('Motor States:', 50, 340);
                     ctx.fillStyle = '#ffffff';
-                    ctx.fillText(`Group 1 (1,3,5): ${data.motorStates.motor1 === 1 ? 'FORWARD' : data.motorStates.motor1 === -1 ? 'BACKWARD' : 'STOP'}`, 50, 330);
-                    ctx.fillText(`Group 2 (2,4,6): ${data.motorStates.motor2 === 1 ? 'FORWARD' : data.motorStates.motor2 === -1 ? 'BACKWARD' : 'STOP'}`, 50, 360);
+                    ctx.fillText(`Group 1 (1,3,5): ${data.motorStates.motor1 === 1 ? 'FORWARD' : data.motorStates.motor1 === -1 ? 'BACKWARD' : 'STOP'}`, 50, 370);
+                    ctx.fillText(`Group 2 (2,4,6): ${data.motorStates.motor2 === 1 ? 'FORWARD' : data.motorStates.motor2 === -1 ? 'BACKWARD' : 'STOP'}`, 50, 400);
                 }
                 
                 // Instructions
                 ctx.fillStyle = '#888888';
                 ctx.font = '20px monospace';
-                ctx.fillText('Right Stick: Move Forward/Back/Left/Right', 50, 420);
-                ctx.fillText('Left Stick: Rotate Left/Right', 50, 450);
+                ctx.fillText('Right Stick: Move Forward/Back/Left/Right', 50, 440);
+                ctx.fillText('Left Stick: Rotate Left/Right', 50, 460);
                 ctx.fillText('Triggers: Emergency Stop', 50, 480);
                 
                 // Update texture
@@ -525,8 +697,14 @@
         
         // Debug info
         console.log('🚀 VR Rover Control System Initialized');
-        console.log('📱 For best experience, use Meta Quest 2 browser');
-        console.log('🎮 Make sure controllers are paired and active');
+        console.log('📱 Optimized for Meta Quest 2 Oculus Browser');
+        console.log('🎮 Controllers will be detected automatically');
+        
+        // Additional Quest 2 browser detection
+        if (navigator.userAgent.includes('OculusBrowser')) {
+            console.log('✅ Meta Quest 2 Browser Detected');
+            vrRover.log('✅ Meta Quest 2 Browser Detected', 'success');
+        }
     </script>
 </body>
 </html>
