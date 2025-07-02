@@ -36,6 +36,7 @@ const MQTT_TOPICS = {
 };
 
 // Motor Control Logic
+// Updated Motor Control Logic for Quest 2 Controllers
 class MotorController {
     constructor() {
         // Motor pairs: Group1 (1,3,5) and Group2 (2,4,6)
@@ -44,6 +45,8 @@ class MotorController {
             group2: 0
         };
         this.currentCommand = 'STOP';
+        this.lastCommand = 'STOP';
+        this.debugMode = true; // Enable detailed logging
     }
 
     // Convert VR controller input to motor commands
@@ -51,80 +54,163 @@ class MotorController {
         let command = 'STOP';
         let group1 = 0, group2 = 0;
 
-        // Right thumbstick for movement
-        if (rightController.axes && rightController.axes.length >= 2) {
-            const x = rightController.axes[0]; // Left/Right
-            const y = rightController.axes[1]; // Forward/Backward
+        // Debug: Log the complete controller state
+        if (this.debugMode) {
+            console.log('🔍 Controller Debug Info:');
+            console.log('Left Controller Axes:', leftController.axes?.map(a => a?.toFixed(3)) || 'none');
+            console.log('Right Controller Axes:', rightController.axes?.map(a => a?.toFixed(3)) || 'none');
+            console.log('Left Buttons Pressed:', leftController.buttons?.filter(b => b?.pressed).length || 0);
+            console.log('Right Buttons Pressed:', rightController.buttons?.filter(b => b?.pressed).length || 0);
+        }
 
-            // Deadzone
-            if (Math.abs(x) > 0.3 || Math.abs(y) > 0.3) {
-                if (Math.abs(y) > Math.abs(x)) {
-                    // Forward/Backward movement
-                    if (y < -0.3) {
+        // Quest 2 Controller Axis Mapping (commonly axes[2] and axes[3] for thumbsticks)
+        // Try multiple possible axis configurations
+        const rightThumbstick = this.getThumbstickValues(rightController, 'right');
+        const leftThumbstick = this.getThumbstickValues(leftController, 'left');
+
+        if (this.debugMode) {
+            console.log('🎮 Processed Thumbsticks:');
+            console.log('Right Thumbstick:', rightThumbstick);
+            console.log('Left Thumbstick:', leftThumbstick);
+        }
+
+        const deadzone = 0.2; // Increased deadzone for better control
+
+        // Right thumbstick for movement (Primary movement)
+        if (rightThumbstick.x !== 0 || rightThumbstick.y !== 0) {
+            if (Math.abs(rightThumbstick.x) > deadzone || Math.abs(rightThumbstick.y) > deadzone) {
+                if (Math.abs(rightThumbstick.y) > Math.abs(rightThumbstick.x)) {
+                    // Forward/Backward movement (Y-axis)
+                    if (rightThumbstick.y < -deadzone) {
                         command = 'FORWARD';
                         group1 = 1;
                         group2 = 1;
-                    } else if (y > 0.3) {
+                    } else if (rightThumbstick.y > deadzone) {
                         command = 'BACKWARD';
                         group1 = -1;
                         group2 = -1;
                     }
                 } else {
-                    // Left/Right movement
-                    if (x < -0.3) {
+                    // Left/Right movement (X-axis)
+                    if (rightThumbstick.x < -deadzone) {
                         command = 'LEFT';
-                        group1 = 1;
-                        group2 = -1;
-                    } else if (x > 0.3) {
+                        group1 = 1;   // Left motors forward
+                        group2 = -1;  // Right motors backward
+                    } else if (rightThumbstick.x > deadzone) {
                         command = 'RIGHT';
-                        group1 = -1;
-                        group2 = 1;
+                        group1 = -1;  // Left motors backward
+                        group2 = 1;   // Right motors forward
                     }
                 }
             }
         }
 
-        // Left thumbstick for rotation
-        if (leftController.axes && leftController.axes.length >= 2) {
-            const x = leftController.axes[0];
-            if (Math.abs(x) > 0.3) {
-                if (x < -0.3) {
+        // Left thumbstick for rotation (Override movement if rotating)
+        if (leftThumbstick.x !== 0) {
+            if (Math.abs(leftThumbstick.x) > deadzone) {
+                if (leftThumbstick.x < -deadzone) {
                     command = 'ROTATE_LEFT';
-                    group1 = -1;
-                    group2 = 1;
-                } else if (x > 0.3) {
+                    group1 = -1;  // Left motors backward
+                    group2 = 1;   // Right motors forward
+                } else if (leftThumbstick.x > deadzone) {
                     command = 'ROTATE_RIGHT';
-                    group1 = 1;
-                    group2 = -1;
+                    group1 = 1;   // Left motors forward
+                    group2 = -1;  // Right motors backward
                 }
             }
         }
 
-        // Trigger for emergency stop
-        if (leftController.buttons?.[1]?.pressed || rightController.buttons?.[1]?.pressed) {
+        // Emergency stop with triggers or grip buttons
+        if (this.checkEmergencyStop(leftController, rightController)) {
             command = 'EMERGENCY_STOP';
             group1 = 0;
             group2 = 0;
         }
 
+        // Update motor states
         this.motorStates.group1 = group1;
         this.motorStates.group2 = group2;
+        
+        // Only log if command changed to reduce spam
+        if (command !== this.lastCommand) {
+            console.log(`🚀 Command Changed: ${this.lastCommand} → ${command}`);
+            this.lastCommand = command;
+        }
+        
         this.currentCommand = command;
 
         return {
             command,
             group1,
             group2,
-            motors: this.getMotorStates()
+            motors: this.getMotorStates(),
+            debug: {
+                rightThumbstick,
+                leftThumbstick,
+                deadzone
+            }
+        };
+    }
+
+    // Extract thumbstick values from different possible axis positions
+    getThumbstickValues(controller, hand) {
+        if (!controller.axes || controller.axes.length === 0) {
+            return { x: 0, y: 0 };
+        }
+
+        const axes = controller.axes;
+        let x = 0, y = 0;
+
+        // Quest 2 controller axis mapping variations
+        // Try different common configurations
+        if (axes.length >= 4) {
+            // Configuration 1: axes[2] and axes[3] (most common for Quest 2)
+            if (Math.abs(axes[2]) > 0.05 || Math.abs(axes[3]) > 0.05) {
+                x = axes[2] || 0;
+                y = axes[3] || 0;
+            }
+            // Configuration 2: axes[0] and axes[1] (standard)
+            else if (Math.abs(axes[0]) > 0.05 || Math.abs(axes[1]) > 0.05) {
+                x = axes[0] || 0;
+                y = axes[1] || 0;
+            }
+        } else if (axes.length >= 2) {
+            // Fallback to first two axes
+            x = axes[0] || 0;
+            y = axes[1] || 0;
+        }
+
+        // Auto-detect which axes have actual input
+        if (x === 0 && y === 0 && axes.length > 0) {
+            // Check all axes to find the active ones
+            for (let i = 0; i < axes.length - 1; i += 2) {
+                if (Math.abs(axes[i]) > 0.05 || Math.abs(axes[i + 1]) > 0.05) {
+                    x = axes[i] || 0;
+                    y = axes[i + 1] || 0;
+                    if (this.debugMode) {
+                        console.log(`🔍 Auto-detected thumbstick at axes[${i}], axes[${i + 1}] for ${hand} controller`);
+                    }
+                    break;
+                }
+            }
+        }
+
+        return { x: parseFloat(x.toFixed(3)), y: parseFloat(y.toFixed(3)) };
+    }
+
+    // Check for emergency stop conditions
+    checkEmergencyStop(leftController, rightController) {
+        // Check various button combinations that might be triggers
+        const checkButtons = (controller) => {
+            if (!controller.buttons) return false;
+            
+            // Check common trigger button indices
+            const triggerIndices = [0, 1, 2, 6, 7]; // Common trigger button indices
+            return triggerIndices.some(i => controller.buttons[i]?.pressed);
         };
 
-        // Add this temporary debug code to your server.js processControllerInput method
-        console.log('🔍 RAW CONTROLLER DATA:');
-        console.log('Left axes length:', leftController.axes?.length);
-        console.log('Right axes length:', rightController.axes?.length);
-        console.log('Left axes values:', leftController.axes);
-        console.log('Right axes values:', rightController.axes);
-            }
+        return checkButtons(leftController) || checkButtons(rightController);
+    }
 
     getMotorStates() {
         return {
@@ -135,6 +221,11 @@ class MotorController {
             motor5: this.motorStates.group1,
             motor6: this.motorStates.group2
         };
+    }
+
+    // Method to disable debug logging once everything is working
+    setDebugMode(enabled) {
+        this.debugMode = enabled;
     }
 }
 

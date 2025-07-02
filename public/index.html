@@ -182,6 +182,8 @@
                 this.displayTexture = null;
                 this.displayCanvas = null;
                 this.displayContext = null;
+                    this.previousControllerStates = null;
+                    this.forceNextUpdate = true;
                 
                 this.controllerStates = {
                     left: { axes: [0, 0, 0, 0], buttons: [] },
@@ -189,7 +191,7 @@
                 };
                 
                 this.lastCommandTime = 0;
-                this.commandThrottle = 50; // ms
+                this.commandThrottle = 100; // ms
                 
                 this.init();
             }
@@ -463,19 +465,34 @@
                 const now = Date.now();
                 if (now - this.lastCommandTime < this.commandThrottle) return;
                 
-                let leftController = { axes: [0, 0, 0, 0], buttons: [] };
-                let rightController = { axes: [0, 0, 0, 0], buttons: [] };
+                let leftController = { axes: [], buttons: [] };
+                let rightController = { axes: [], buttons: [] };
                 
+                // Enhanced controller data extraction
                 for (const source of inputSources) {
-                    if (!source.gamepad) continue;
+                    if (!source.gamepad) {
+                        console.log(`⚠️ No gamepad data for ${source.handedness} controller`);
+                        continue;
+                    }
                     
+                    const gamepad = source.gamepad;
                     const controllerData = {
-                        axes: Array.from(source.gamepad.axes || []),
-                        buttons: (source.gamepad.buttons || []).map(b => ({
-                            pressed: b.pressed,
-                            value: b.value
-                        }))
+                        axes: Array.from(gamepad.axes || []).map(axis => parseFloat(axis.toFixed(4))),
+                        buttons: Array.from(gamepad.buttons || []).map(button => ({
+                            pressed: button.pressed || false,
+                            value: parseFloat((button.value || 0).toFixed(4))
+                        })),
+                        handedness: source.handedness,
+                        connected: source.connected !== false
                     };
+                    
+                    // Enhanced debugging
+                    console.log(`🎮 ${source.handedness.toUpperCase()} Controller:`, {
+                        axes: controllerData.axes,
+                        buttonsPressed: controllerData.buttons.filter(b => b.pressed).length,
+                        totalButtons: controllerData.buttons.length,
+                        connected: controllerData.connected
+                    });
                     
                     if (source.handedness === 'left') {
                         leftController = controllerData;
@@ -484,40 +501,150 @@
                     }
                 }
                 
-                // Debug logging to see actual controller values
-                if (leftController.axes.length > 0 || rightController.axes.length > 0) {
-                    console.log('Controller Data:', {
-                        left: { 
-                            axes: leftController.axes.map(a => a.toFixed(3)),
-                            buttonsPressed: leftController.buttons.filter(b => b.pressed).length
-                        },
-                        right: { 
-                            axes: rightController.axes.map(a => a.toFixed(3)),
-                            buttonsPressed: rightController.buttons.filter(b => b.pressed).length
+                // Enhanced input detection
+                const hasSignificantInput = this.hasSignificantInput(leftController, rightController);
+                const hasInputChange = this.hasInputChanged(leftController, rightController);
+                
+                // Always send data if there's input or if state changed
+                if (hasSignificantInput || hasInputChange || this.forceNextUpdate) {
+                    console.log('📤 Sending controller data to server');
+                    
+                    this.socket.emit('controller-input', {
+                        leftController,
+                        rightController,
+                        timestamp: now,
+                        inputSources: inputSources.length
+                    });
+                    
+                    this.lastCommandTime = now;
+                    this.forceNextUpdate = false;
+                    
+                    // Update VR display
+                    const displayData = this.analyzeInput(leftController, rightController);
+                    this.updateVRDisplay('Controller Active', displayData);
+                }
+                
+                // Store previous states
+                this.previousControllerStates = {
+                    left: leftController,
+                    right: rightController
+                };
+            }
+
+            // Enhanced input significance detection
+            hasSignificantInput(left, right) {
+                const threshold = 0.15;
+                
+                // Check all axes for significant input
+                const checkAxes = (controller) => {
+                    if (!controller.axes) return false;
+                    return controller.axes.some(axis => Math.abs(axis) > threshold);
+                };
+                
+                // Check for pressed buttons
+                const hasButtons = (controller) => {
+                    if (!controller.buttons) return false;
+                    return controller.buttons.some(button => button.pressed);
+                };
+                
+                return checkAxes(left) || checkAxes(right) || hasButtons(left) || hasButtons(right);
+            }
+
+            // Detect input changes
+            hasInputChanged(left, right) {
+                if (!this.previousControllerStates) return true;
+                
+                const threshold = 0.05;
+                
+                const checkAxisChange = (current, previous) => {
+                    if (!current.axes || !previous.axes) return true;
+                    
+                    const maxLength = Math.max(current.axes.length, previous.axes.length);
+                    for (let i = 0; i < maxLength; i++) {
+                        const curr = current.axes[i] || 0;
+                        const prev = previous.axes[i] || 0;
+                        if (Math.abs(curr - prev) > threshold) return true;
+                    }
+                    return false;
+                };
+                
+                const checkButtonChange = (current, previous) => {
+                    if (!current.buttons || !previous.buttons) return true;
+                    
+                    const maxLength = Math.max(current.buttons.length, previous.buttons.length);
+                    for (let i = 0; i < maxLength; i++) {
+                        const currPressed = current.buttons[i]?.pressed || false;
+                        const prevPressed = previous.buttons[i]?.pressed || false;
+                        if (currPressed !== prevPressed) return true;
+                    }
+                    return false;
+                };
+                
+                const prev = this.previousControllerStates;
+                return checkAxisChange(left, prev.left) || 
+                    checkAxisChange(right, prev.right) ||
+                    checkButtonChange(left, prev.left) ||
+                    checkButtonChange(right, prev.right);
+            }
+
+            // Analyze current input for display
+            analyzeInput(leftController, rightController) {
+                let command = 'STOP';
+                let activeAxes = [];
+                
+                // Find axes with significant input
+                if (leftController.axes) {
+                    leftController.axes.forEach((axis, index) => {
+                        if (Math.abs(axis) > 0.15) {
+                            activeAxes.push(`L${index}: ${axis.toFixed(3)}`);
                         }
                     });
                 }
                 
-                // Always send controller data if there's any significant input OR if it's different from last state
-                const hasInput = this.hasAnyInput(leftController, rightController);
-                const hasChanged = this.hasSignificantInputChange(leftController, rightController);
-                
-                if (hasInput || hasChanged) {
-                    this.socket.emit('controller-input', {
-                        leftController,
-                        rightController,
-                        timestamp: now
+                if (rightController.axes) {
+                    rightController.axes.forEach((axis, index) => {
+                        if (Math.abs(axis) > 0.15) {
+                            activeAxes.push(`R${index}: ${axis.toFixed(3)}`);
+                        }
                     });
-                    
-                    this.lastCommandTime = now;
-                    
-                    // Update VR display with current input
-                    const displayData = this.getDisplayData(leftController, rightController);
-                    this.updateVRDisplay('Controller Input Active', displayData);
                 }
                 
-                this.controllerStates.left = leftController;
-                this.controllerStates.right = rightController;
+                // Determine likely command based on active axes
+                if (rightController.axes && rightController.axes.length >= 4) {
+                    const x = rightController.axes[2] || rightController.axes[0] || 0;
+                    const y = rightController.axes[3] || rightController.axes[1] || 0;
+                    
+                    if (Math.abs(x) > 0.15 || Math.abs(y) > 0.15) {
+                        if (Math.abs(y) > Math.abs(x)) {
+                            command = y < 0 ? 'FORWARD' : 'BACKWARD';
+                        } else {
+                            command = x < 0 ? 'LEFT' : 'RIGHT';
+                        }
+                    }
+                }
+                
+                if (leftController.axes && leftController.axes.length >= 4) {
+                    const x = leftController.axes[2] || leftController.axes[0] || 0;
+                    if (Math.abs(x) > 0.15) {
+                        command = x < 0 ? 'ROTATE_LEFT' : 'ROTATE_RIGHT';
+                    }
+                }
+                
+                // Check for emergency stop
+                const emergencyStop = (leftController.buttons?.some(b => b.pressed) || 
+                                    rightController.buttons?.some(b => b.pressed));
+                if (emergencyStop) {
+                    command = 'EMERGENCY_STOP';
+                }
+                
+                return {
+                    command,
+                    activeAxes,
+                    leftAxes: leftController.axes || [],
+                    rightAxes: rightController.axes || [],
+                    leftButtons: leftController.buttons?.filter(b => b.pressed).length || 0,
+                    rightButtons: rightController.buttons?.filter(b => b.pressed).length || 0
+                };
             }
             
             hasAnyInput(left, right) {
